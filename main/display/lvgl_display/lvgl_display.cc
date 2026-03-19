@@ -138,13 +138,19 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             // Set status to clock "HH:MM"
             time_t now = time(NULL);
             struct tm* tm = localtime(&now);
-            // Check if the we have already set the time
+            // Check if we have already synced real time
             if (tm->tm_year >= 2025 - 1900) {
                 char time_str[16];
                 strftime(time_str, sizeof(time_str), "%H:%M", tm);
                 SetStatus(time_str);
             } else {
-                ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
+                // Fallback to uptime clock while RTC/network time is unavailable.
+                int64_t uptime_sec = esp_timer_get_time() / 1000000;
+                int mins = (int)(uptime_sec / 60);
+                int secs = (int)(uptime_sec % 60);
+                char time_str[16];
+                snprintf(time_str, sizeof(time_str), "%02d:%02d", mins, secs);
+                SetStatus(time_str);
             }
         }
     }

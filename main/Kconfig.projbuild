@@ -518,6 +518,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_HU_087
         bool "HU-087"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_LCDWIKI_ESP32_S3_2_8
+        bool "LCDWiki ESP32-S3 2.8-inch"
+        depends on IDF_TARGET_ESP32S3
 endchoice
 
 choice
