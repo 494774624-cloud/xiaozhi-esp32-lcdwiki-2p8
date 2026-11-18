@@ -7,7 +7,14 @@
                 "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y",
                 "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions/v2/16m.csv\"",
                 "CONFIG_LANGUAGE_EN_US=y",
-                "CONFIG_SR_WN_WN9_HIESP=y"
+                "CONFIG_USE_CUSTOM_WAKE_WORD=y",
+                "CONFIG_SR_WN_NIHAOXIAOZHI_TTS=n",
+                "CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=n",
+                "CONFIG_SR_WN_WN9_HIESP=n",
+                "CONFIG_SR_MN_CN_MULTINET6_QUANT=y",
+                "CONFIG_CUSTOM_WAKE_WORD=\"xiao xu tong xue\"",
+                "CONFIG_CUSTOM_WAKE_WORD_DISPLAY=\"小徐同学\"",
+                "CONFIG_CUSTOM_WAKE_WORD_THRESHOLD=25"
             ]
         }
     ]
