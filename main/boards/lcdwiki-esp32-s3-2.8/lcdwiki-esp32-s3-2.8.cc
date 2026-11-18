@@ -6,9 +6,10 @@
 #include "display/lcd_display.h"
 #include "led/single_led.h"
 #include "mcp_server.h"
-
+#include "adc_battery_monitor.h"
+#include "driver/gpio.h"
+#include "esp_sleep.h"
 #include <wifi_manager.h>
-
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
 #include <esp_lcd_ili9341.h>
@@ -19,15 +20,18 @@
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <lvgl.h>
-
 #define TAG "LcdWikiEsp32S3_2_8"
-
+// Battery voltage sense: BAT_ADC = IO9 (ADC1_CH8), 1:1 divider -> Vbat = Vadc * 2
+#define BATTERY_ADC_UNIT ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL ADC_CHANNEL_8
+#define BATTERY_ADC_UPPER_RESISTOR 100000.0f
+#define BATTERY_ADC_LOWER_RESISTOR 100000.0f
 class LcdWikiEsp32S3_2_8 : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     Display* display_ = nullptr;
     Button boot_button_;
-
+    AdcBatteryMonitor* adc_battery_monitor_ = nullptr;
     void InitializeI2c() {
         i2c_master_bus_config_t bus_config = {
             .i2c_port = I2C_NUM_0,
@@ -41,7 +45,6 @@ private:
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &i2c_bus_));
     }
-
     void InitializeSpi() {
         spi_bus_config_t bus_config = {};
         bus_config.mosi_io_num = DISPLAY_SPI_MOSI_PIN;
@@ -52,11 +55,9 @@ private:
         bus_config.max_transfer_sz = DISPLAY_WIDTH * DISPLAY_HEIGHT * sizeof(uint16_t);
         ESP_ERROR_CHECK(spi_bus_initialize(DISPLAY_SPI_HOST, &bus_config, SPI_DMA_CH_AUTO));
     }
-
     void InitializeDisplay() {
         esp_lcd_panel_io_handle_t panel_io = nullptr;
         esp_lcd_panel_handle_t panel = nullptr;
-
         esp_lcd_panel_io_spi_config_t io_config = {};
         io_config.cs_gpio_num = DISPLAY_SPI_CS_PIN;
         io_config.dc_gpio_num = DISPLAY_DC_PIN;
@@ -66,27 +67,23 @@ private:
         io_config.lcd_cmd_bits = 8;
         io_config.lcd_param_bits = 8;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(DISPLAY_SPI_HOST, &io_config, &panel_io));
-
         esp_lcd_panel_dev_config_t panel_config = {};
         panel_config.reset_gpio_num = DISPLAY_RST_PIN;
         panel_config.rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB;
         panel_config.bits_per_pixel = 16;
         ESP_ERROR_CHECK(esp_lcd_new_panel_ili9341(panel_io, &panel_config, &panel));
-
         ESP_ERROR_CHECK(esp_lcd_panel_reset(panel));
         ESP_ERROR_CHECK(esp_lcd_panel_init(panel));
         ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel, DISPLAY_INVERT_COLOR));
         ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY));
         ESP_ERROR_CHECK(esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
         ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel, true));
-
         display_ = new SpiLcdDisplay(
             panel_io, panel,
             DISPLAY_WIDTH, DISPLAY_HEIGHT,
             DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
             DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
-
     void InitializeTouch() {
         esp_lcd_touch_handle_t tp;
         esp_lcd_touch_config_t tp_cfg = {
@@ -104,20 +101,17 @@ private:
                 .mirror_y = TOUCH_MIRROR_Y,
             },
         };
-
         esp_lcd_panel_io_handle_t tp_io_handle = nullptr;
         esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_FT5x06_CONFIG();
         tp_io_config.scl_speed_hz = 400 * 1000;
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));
         ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft5x06(tp_io_handle, &tp_cfg, &tp));
-
         const lvgl_port_touch_cfg_t touch_cfg = {
             .disp = lv_display_get_default(),
             .handle = tp,
         };
         lvgl_port_add_touch(&touch_cfg);
     }
-
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
@@ -127,8 +121,23 @@ private:
             }
             app.ToggleChatState();
         });
+        // Long press BOOT (>=3s) -> power off (deep sleep). Press BOOT again to wake.
+        boot_button_.OnLongPress([this]() {
+            ESP_LOGI(TAG, "Long press BOOT: powering off (deep sleep)");
+            GetBacklight()->SetBrightness(0);
+            GetDisplay()->SetPowerSaveMode(true);
+            // BOOT button (IO0) low level wakes the chip from deep sleep
+            ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(BOOT_BUTTON_GPIO, 0));
+            esp_deep_sleep_start();
+        });
     }
-
+    void InitializeBatteryMonitor() {
+        // No dedicated charge-detect pin on this board -> software estimation
+        adc_battery_monitor_ = new AdcBatteryMonitor(
+            BATTERY_ADC_UNIT, BATTERY_ADC_CHANNEL,
+            BATTERY_ADC_UPPER_RESISTOR, BATTERY_ADC_LOWER_RESISTOR,
+            GPIO_NUM_NC);
+    }
     void InitializeTools() {
         auto& mcp_server = McpServer::GetInstance();
         mcp_server.AddTool("self.system.reconfigure_wifi",
@@ -139,24 +148,22 @@ private:
                 return true;
             });
     }
-
 public:
-    LcdWikiEsp32S3_2_8() : boot_button_(BOOT_BUTTON_GPIO) {
+    LcdWikiEsp32S3_2_8() : boot_button_(BOOT_BUTTON_GPIO, false, 3000) {
         ESP_LOGI(TAG, "Initializing LCDWiki ESP32-S3 2.8 board");
         InitializeI2c();
         InitializeSpi();
         InitializeDisplay();
         InitializeTouch();
+        InitializeBatteryMonitor();
         InitializeButtons();
         InitializeTools();
         GetBacklight()->SetBrightness(100);
     }
-
     virtual Led* GetLed() override {
         static SingleLed led(BUILTIN_LED_GPIO);
         return &led;
     }
-
     virtual AudioCodec* GetAudioCodec() override {
         static Es8311AudioCodec audio_codec(
             i2c_bus_, I2C_NUM_0,
@@ -166,15 +173,18 @@ public:
             AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR, true, AUDIO_CODEC_PA_INVERTED);
         return &audio_codec;
     }
-
     virtual Display* GetDisplay() override {
         return display_;
     }
-
     virtual Backlight* GetBacklight() override {
         static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
     }
+    virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
+        charging = adc_battery_monitor_->IsCharging();
+        discharging = adc_battery_monitor_->IsDischarging();
+        level = adc_battery_monitor_->GetBatteryLevel();
+        return true;
+    }
 };
-
 DECLARE_BOARD(LcdWikiEsp32S3_2_8);
